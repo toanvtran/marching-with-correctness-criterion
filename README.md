@@ -1,1 +1,0 @@
-# marching-with-correctness-criterion
