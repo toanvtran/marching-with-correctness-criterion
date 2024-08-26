@@ -30,6 +30,6 @@
 - Make sure that both `GridSize` and `N` (which equals `(MAX - MIN) / spacing`) in `parallel.cu` are powers of 2.
 
 ## Reference
-[Efficient Algorithms for Solving Static Hamilton-Jacobi Equations - Mauch, Sean Patrick (2003)](https://thesis.library.caltech.edu/1888/)
+[Efficient Algorithms for Solving Static Hamilton-Jacobi Equations](https://thesis.library.caltech.edu/1888/)
 
 
