@@ -33,8 +33,9 @@
 
 
 ## Reference
-[Efficient Algorithms for Solving Static Hamilton-Jacobi Equations](https://thesis.library.caltech.edu/1888/)
+Algorithm: [Efficient Algorithms for Solving Static Hamilton-Jacobi Equations](https://thesis.library.caltech.edu/1888/) 
 
+Implementation:
 [Optimizing Parallel Reduction in CUDA](https://imsc.uni-graz.at/haasegu/Lectures/GPU_CUDA/Lit/reduction.pdf)
 
 
