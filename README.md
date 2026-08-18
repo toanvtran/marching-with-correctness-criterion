@@ -3,7 +3,8 @@
 
 ### To run sequential code (`sequential.c`):
 
-- Make sure your computer have `gcc`.
+- Make sure your computer has `gcc`.
+
 
 - In master directory:
     ```
@@ -14,7 +15,8 @@
 - Output is in `sequential.txt`
 
 ### To run parallel code (`parallel.cu`):
-- Make sure your computer have `nvcc`.
+- Make sure your computer has `nvcc`.
+
 
 - In master directory:
     ```
@@ -27,9 +29,13 @@
 
 - Change the constants, behaviors of `input_data`, and `speed_function` in both codes.
 
-- Make sure that both `GridSize` and `N` (which equals `(MAX - MIN) / spacing`) in `parallel.cu` are powers of 2.
+- `N` (which equals `(MAX - MIN) / spacing`) is a positive integer.
+
 
 ## Reference
 [Efficient Algorithms for Solving Static Hamilton-Jacobi Equations](https://thesis.library.caltech.edu/1888/)
+
+[Optimizing Parallel Reduction in CUDA](https://imsc.uni-graz.at/haasegu/Lectures/GPU_CUDA/Lit/reduction.pdf)
+
 
 

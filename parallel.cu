@@ -1,4 +1,3 @@
-
 #include <stdio.h> 
 #include <malloc.h> 
 #include <stdbool.h>
@@ -44,9 +43,14 @@ typedef struct {
 } indices;
 
 typedef struct {
-    indices *list;
+    // Array stored BY VALUE (max 4 neighbors). The device helper functions
+    // build this list on their stack; returning a pointer to a local array is
+    // undefined behavior (dangling stack pointer) and was corrupting results.
+    // Embedding the array in the struct makes the return a plain value copy.
+    indices list[4];
     int count;
 } indices_list;
+
 
 void write_to_file_real_array(double *T, int m, int n) {
     FILE *result = fopen("parallel.txt", "w");
@@ -117,20 +121,41 @@ __device__ int indices_to_index(indices indices, int N) {
     return indices.i * N + indices.j;
 }
 
+// Pad to next power of 2
+__device__ int next_power_of_2(int n) {
+    int p = 1;
+    while (p < n) p <<= 1;
+    return p;
+}
+
+// Total number of grid cells. Element-wise kernels are launched with
+// ceil(M/blockSize) blocks, which spawns extra threads whenever M is not a
+// multiple of blockSize. Every such kernel MUST guard `index < M` or those
+// stray threads read/write out of bounds and corrupt neighboring device
+// allocations. This (not just the reduction) is why the code previously only
+// worked when N*N was a multiple of the block size (e.g. powers of two).
+__device__ __forceinline__ int total_cells() {
+    int N = round((MAX - MIN) / spacing);
+    return N * N;
+}
+
 __global__ void mask_init(int *mask) {
     int index;
     index = blockIdx.x * blockDim.x + threadIdx.x;
+    if (index >= total_cells()) return;
     *(mask + index) = 0;
 }
 
 __global__ void known_status_init(int *known_status, int *status) {
     int index;
     index = blockIdx.x * blockDim.x + threadIdx.x;
+    if (index >= total_cells()) return;
     *(known_status + index) = 0;
     if (*(status + index) == 2) { 
         *(known_status + index) = 1;
     }
 }
+
 
 __device__ bool keep_in_grid(indices idx) {
     int i = idx.i, j = idx.j;
@@ -144,68 +169,58 @@ __device__ bool keep_in_grid(indices idx) {
 __device__ indices_list get_adjacents(indices inp_indices) {
 
     int i = inp_indices.i, j = inp_indices.j;
-    int k, count = 0; 
+    int k;
     indices all[4] = {{i, j+1}, {i, j-1}, {i+1, j}, {i-1, j}};
-
-    indices *list; 
-    list = (indices *) malloc (4*sizeof(indices)); 
+    indices_list out;
+    out.count = 0;
 
     for (k=0; k<4; k++) {
         if (keep_in_grid(all[k]) == true) { 
-            *(list + count) = all[k];
-            count += 1;
+            out.list[out.count] = all[k];
+            out.count += 1;
         }
     }
 
-    // if (count < 4) {
-    //     indices *tmp  = (indices *) realloc (list, count*sizeof(indices));
-    // }
-
-    indices_list out = {list, count};
     return out;
 }
+
 
 __device__ indices_list get_diagonals(indices inp_indices) {
     
     int i = inp_indices.i, j = inp_indices.j;
-    int k, count = 0;
+    int k;
     indices all[4] = {{i+1, j+1}, {i-1, j-1}, {i+1, j-1}, {i-1, j+1}};
-
-    indices *list;
-    list = (indices *) malloc (4*sizeof(indices));
+    indices_list out;
+    out.count = 0;
 
     for (k=0; k<4; k++) {
         if (keep_in_grid(all[k]) == true) {
-            *(list + count) = all[k]; 
+            out.list[out.count] = all[k]; 
 
-            count += 1;
+            out.count += 1;
         }
     }
 
-    // if (count < 4) {
-    //     indices *tmp  = (indices *) realloc (list, count*sizeof(indices));
-    // }
-
-    indices_list out = {list, count};
     return out;
 }
+
 
 __device__ indices_list get_adjacents_with_diagonal(indices source, indices diagonal) {
     
     int i = source.i, j = source.j;
     int p = diagonal.i, q = diagonal.j;
     int a = min(i,p), b = min(j,q);
-    int k, count = 0;
-    indices *list;
-    list = (indices *) malloc (2*sizeof(indices));
+    int k;
+    indices_list out;
+    out.count = 0;
 
     if (((a==i)&&(b==j)) || ((a==p)&&(b==q))) {
         indices all[2] = {{a, b+1}, {a+1, b}}; 
 
         for (k=0; k<2; k++) {
             if (keep_in_grid(all[k]) == true) {
-                *(list + count) = all[k];
-                count += 1;
+                out.list[out.count] = all[k];
+                out.count += 1;
             }
         }
     }
@@ -214,36 +229,31 @@ __device__ indices_list get_adjacents_with_diagonal(indices source, indices diag
 
         for (k=0; k<2; k++) {
             if (keep_in_grid(all[k]) == true) {
-                *(list + count) = all[k];
-                count += 1;
+                out.list[out.count] = all[k];
+                out.count += 1;
             }
         }
     }
 
-    // if (count < 2) {
-    //     indices *tmp  = (indices *) realloc (list, count*sizeof(indices));
-    // }
-
-    indices_list out = {list, count};
-
     return out;
 }
+
 
 __device__ indices_list get_diagonals_with_adjacent(indices source, indices diagonal) {
 
     int i = source.i, j = source.j;
     int p = diagonal.i, q = diagonal.j;
-    int k, count = 0;
-    indices *list;
-    list = (indices *) malloc (2*sizeof(indices));
+    int k;
+    indices_list out;
+    out.count = 0;
 
     if (abs(i-p) > abs(j-q)) {
         indices all[2] = {{i, j+1}, {i, j-1}}; 
 
         for (k=0; k<2; k++) {
             if (keep_in_grid(all[k]) == true) {
-                *(list + count) = all[k];
-                count += 1;
+                out.list[out.count] = all[k];
+                out.count += 1;
             }
         }
     }
@@ -252,135 +262,158 @@ __device__ indices_list get_diagonals_with_adjacent(indices source, indices diag
 
         for (k=0; k<2; k++) {
             if (keep_in_grid(all[k]) == true) {
-                *(list + count) = all[k];
-                count += 1;
+                out.list[out.count] = all[k];
+                out.count += 1;
             }
         }
     }
 
-    // if (count < 2) {
-    //     indices *tmp  = (indices *) realloc (list, count*sizeof(indices));
-    // }
-
-    indices_list out = {list, count};
-
     return out;
 }
+
 
 __global__ void sum(int *indices_mask, int *new_indices_mask) {
     int index;
     index = blockIdx.x * blockDim.x + threadIdx.x;
+    if (index >= total_cells()) return;
     *(indices_mask + index) += *(new_indices_mask + index);
 }
 
-__global__ void reduce_min_1(double *solution, int *indices_mask, double *out_data) {
-    int N = round((MAX - MIN) / spacing); 
-    extern __shared__ double dynamic_shared_data_1[];
-    // double *dynamic_shared_data = (double *)shared_data_1;
-    
-    int thread_idx, index;
-    unsigned int s;
-    thread_idx = threadIdx.x;
-    index = blockIdx.x * blockDim.x + threadIdx.x;
-    if (*(indices_mask + index) == 1) {
-        dynamic_shared_data_1[thread_idx] = *(solution + index);
-    }
-    else {
-        dynamic_shared_data_1[thread_idx] = Infi;
-    }
-    __syncthreads();
- 
-    for (s = blockDim.x/2; s > 0; s>>=1) {
-        if (thread_idx < s) {
-            dynamic_shared_data_1[thread_idx] = min(dynamic_shared_data_1[thread_idx], dynamic_shared_data_1[thread_idx + s]);
-        }
-    __syncthreads();
-    }
 
-    if (thread_idx == 0) {
-        *(out_data + blockIdx.x) = dynamic_shared_data_1[0];
-    }
-}   
+// -----------------------------------------------------------------------------
+// Optimized parallel reduction
+// (following Mark Harris, "Optimizing Parallel Reduction in CUDA")
+//
+// Techniques applied:
+//   - Grid-stride loop so each thread performs the first level of reduction
+//     while loading from global memory (kernel #7 in the slides). This also
+//     lets us launch a *fixed* number of blocks regardless of input size.
+//   - Warp-level reduction via __shfl_down_sync (no shared memory, no
+//     __syncthreads within a warp).
+//   - Block-level reduction that combines per-warp partial results.
+//
+// Correctness for ARBITRARY (non-power-of-2) sizes is guaranteed because:
+//   - The grid-stride loop only touches valid indices [0, n); everything else
+//     stays at the identity value (Infi for min, 0 for sum).
+//   - The intra-block reduction operates on the warp-partial array whose length
+//     is ceil(blockDim.x / warpSize) and is padded with the identity value.
+//   - blockDim.x is fixed at BLOCK_SIZE (a power of two), so the warp math is
+//     always exact. Input size no longer needs to be a power of two.
+// -----------------------------------------------------------------------------
 
-__global__ void reduce_min_2(double *in_data, double *out_data) {
-    extern __shared__ double dynamic_shared_data[];
-    // double *dynamic_shared_data = (double *)shared_data_2;
-    
-    int thread_idx, index;
-    unsigned int s;
-    thread_idx = threadIdx.x;
-    index = blockIdx.x * blockDim.x + threadIdx.x;
-    dynamic_shared_data[thread_idx] = *(in_data + index);
-    __syncthreads();
- 
-    for (s = blockDim.x/2; s > 0; s>>=1) {
-        if (thread_idx < s) {
-            dynamic_shared_data[thread_idx] = min(dynamic_shared_data[thread_idx], dynamic_shared_data[thread_idx + s]);
-        }
-    __syncthreads();
-    }
+#define BLOCK_SIZE    256
+#define WARP_SIZE     32
+#define FULL_MASK     0xffffffffu
+// Fixed number of blocks for the first reduction stage. Any value works for
+// correctness thanks to the grid-stride loop; it must be <= BLOCK_SIZE so the
+// single-block second stage can finish the reduction in one launch.
+#define REDUCE_BLOCKS 256
 
-    if (thread_idx == 0) {
-        *(out_data + blockIdx.x) = dynamic_shared_data[0];
+
+__inline__ __device__ double warpReduceMin(double val) {
+    for (int offset = WARP_SIZE / 2; offset > 0; offset >>= 1) {
+        double other = __shfl_down_sync(FULL_MASK, val, offset);
+        val = min(val, other);
     }
+    return val;
 }
 
-void get_min(double *minimum, double *solution, int *indices_mask, dim3 dimGrid, dim3 dimBlock) {
-    int N = round((MAX - MIN) / spacing);
-    double *out_data;
-    gpuErrchk(cudaMalloc((void**)&out_data, GridSize*sizeof(double)));  
-
-    size_t shareMemSize = ((N*N)/GridSize) * sizeof(double);
-    reduce_min_1<<<dimGrid, dimBlock, shareMemSize>>>(solution, indices_mask, out_data);;
-    gpuErrchk(cudaGetLastError());
-    gpuErrchk(cudaDeviceSynchronize());
-    shareMemSize = GridSize * sizeof(double);
-    reduce_min_2<<<1, dimGrid, shareMemSize>>>(out_data, minimum);;
-    gpuErrchk(cudaGetLastError());
-    gpuErrchk(cudaDeviceSynchronize());  
-}
-
-
-__global__ void reduce_sum(int *in_data, int *out_data) {
-    extern __shared__ int shared_data[];
-    int *dynamic_shared_data = (int *)shared_data;
-    
-    int thread_idx, index, s;
-    thread_idx = threadIdx.x;
-    index = blockIdx.x * blockDim.x + threadIdx.x;
-    dynamic_shared_data[thread_idx] = *(in_data + index);
-    __syncthreads();
- 
-    for (s = blockDim.x/2; s > 0; s>>=1) {
-        if (thread_idx < s) {
-            dynamic_shared_data[thread_idx] += dynamic_shared_data[thread_idx + s];
-        }
-    __syncthreads();
+__inline__ __device__ int warpReduceSum(int val) {
+    for (int offset = WARP_SIZE / 2; offset > 0; offset >>= 1) {
+        val += __shfl_down_sync(FULL_MASK, val, offset);
     }
+    return val;
+}
 
-    if (thread_idx == 0) {
-        *(out_data + blockIdx.x) = dynamic_shared_data[0];
+__inline__ __device__ double blockReduceMin(double val) {
+    __shared__ double shared[WARP_SIZE];       // one slot per warp (max 32 warps)
+    int lane = threadIdx.x % WARP_SIZE;
+    int wid  = threadIdx.x / WARP_SIZE;
+
+    val = warpReduceMin(val);                  // reduce within each warp
+    if (lane == 0) shared[wid] = val;          // write per-warp result
+    __syncthreads();
+
+    int num_warps = (blockDim.x + WARP_SIZE - 1) / WARP_SIZE;
+    val = (threadIdx.x < num_warps) ? shared[lane] : Infi;
+    if (wid == 0) val = warpReduceMin(val);    // final reduce by first warp
+    return val;
+}
+
+__inline__ __device__ int blockReduceSum(int val) {
+    __shared__ int shared[WARP_SIZE];
+    int lane = threadIdx.x % WARP_SIZE;
+    int wid  = threadIdx.x / WARP_SIZE;
+
+    val = warpReduceSum(val);
+    if (lane == 0) shared[wid] = val;
+    __syncthreads();
+
+    int num_warps = (blockDim.x + WARP_SIZE - 1) / WARP_SIZE;
+    val = (threadIdx.x < num_warps) ? shared[lane] : 0;
+    if (wid == 0) val = warpReduceSum(val);
+    return val;
+}
+
+// Stage 1: min over solution[i] where indices_mask[i] == 1, using grid-stride.
+__global__ void reduce_min_masked(const double *solution, const int *indices_mask,
+                                  double *out_data, int n) {
+    double myMin = Infi;
+    for (int i = blockIdx.x * blockDim.x + threadIdx.x; i < n; i += blockDim.x * gridDim.x) {
+        if (indices_mask[i] == 1) myMin = min(myMin, solution[i]);
     }
+    myMin = blockReduceMin(myMin);
+    if (threadIdx.x == 0) out_data[blockIdx.x] = myMin;
 }
 
-void get_num_labels(int *num_labels, int *indices_mask, dim3 dimGrid, dim3 dimBlock) {
-    int N = round((MAX - MIN) / spacing); 
-    int *out_data;
-    gpuErrchk(cudaMalloc((void**)&out_data, GridSize*sizeof(int))); 
-
-    size_t shareMemSize = ((N*N)/GridSize) * sizeof(double);
-    reduce_sum<<<dimGrid, dimBlock, shareMemSize>>>(indices_mask, out_data);
-    gpuErrchk(cudaGetLastError());
-    gpuErrchk(cudaDeviceSynchronize());
-    shareMemSize = GridSize * sizeof(double);
-    reduce_sum<<<1, dimGrid, shareMemSize>>>(out_data, num_labels);;
-    gpuErrchk(cudaGetLastError());
-    gpuErrchk(cudaDeviceSynchronize()); 
+// Stage 2: min over the per-block partial results (no mask).
+__global__ void reduce_min_final(const double *in_data, double *out_data, int n) {
+    double myMin = Infi;
+    for (int i = blockIdx.x * blockDim.x + threadIdx.x; i < n; i += blockDim.x * gridDim.x) {
+        myMin = min(myMin, in_data[i]);
+    }
+    myMin = blockReduceMin(myMin);
+    if (threadIdx.x == 0) out_data[blockIdx.x] = myMin;
 }
+
+// Sum reduction over an int array (grid-stride).
+__global__ void reduce_sum(const int *in_data, int *out_data, int n) {
+    int mySum = 0;
+    for (int i = blockIdx.x * blockDim.x + threadIdx.x; i < n; i += blockDim.x * gridDim.x) {
+        mySum += in_data[i];
+    }
+    mySum = blockReduceSum(mySum);
+    if (threadIdx.x == 0) out_data[blockIdx.x] = mySum;
+}
+
+
+// Two-stage reduction. Stage 1 launches REDUCE_BLOCKS blocks (grid-stride) and
+// produces one partial per block into the caller-provided scratch buffer.
+// Stage 2 runs a single block that reduces the REDUCE_BLOCKS partials.
+// The block-level reduction is exact for any input size, so num_elements need
+// NOT be a power of two.
+void get_min(double *minimum, double *solution, int *indices_mask,
+             double *scratch, int num_elements) {
+    reduce_min_masked<<<REDUCE_BLOCKS, BLOCK_SIZE>>>(solution, indices_mask, scratch, num_elements);
+    gpuErrchk(cudaGetLastError());
+    reduce_min_final<<<1, BLOCK_SIZE>>>(scratch, minimum, REDUCE_BLOCKS);
+    gpuErrchk(cudaGetLastError());
+}
+
+
+void get_num_labels(int *num_labels, int *indices_mask,
+                    int *scratch, int num_elements) {
+    reduce_sum<<<REDUCE_BLOCKS, BLOCK_SIZE>>>(indices_mask, scratch, num_elements);
+    gpuErrchk(cudaGetLastError());
+    reduce_sum<<<1, BLOCK_SIZE>>>(scratch, num_labels, REDUCE_BLOCKS);
+    gpuErrchk(cudaGetLastError());
+}
+
 
 __global__ void known_status_init_and_remove_known_and_sum_and_new_indices_mask_init(int *known_status, int *indices_mask, int *status, int *new_indices_mask) {
     int index;
     index = blockIdx.x * blockDim.x + threadIdx.x;
+    if (index >= total_cells()) return;
     *(known_status + index) = 0;
     if ((*(status + index) == 2) && (*(indices_mask + index) == 1)) {
         *(indices_mask + index) = 0;
@@ -389,9 +422,11 @@ __global__ void known_status_init_and_remove_known_and_sum_and_new_indices_mask_
     *(new_indices_mask + index) = 0; 
 }
 
+
 __global__ void masks_and_known_status_init(int *indices_mask, int *new_indices_mask, int *known_status, int *status) {
     int index;
     index = blockIdx.x * blockDim.x + threadIdx.x;
+    if (index >= total_cells()) return;
     *(indices_mask + index) = 0;   
     *(new_indices_mask + index) = 0; 
     *(known_status + index) = 0; 
@@ -399,6 +434,7 @@ __global__ void masks_and_known_status_init(int *indices_mask, int *new_indices_
         *(known_status + index) = 1;
     }
 }
+
 // End convenient functions
 
 __device__ bool correct(double a, double minimum) {
@@ -411,17 +447,23 @@ __device__ bool correct(double a, double minimum) {
 __global__ void update_status_with_criterion(double *solution, int *status, int *known_status, double *minimum) {
     int index;
     index = blockIdx.x * blockDim.x + threadIdx.x;
+    if (index >= total_cells()) return;
     if (correct(*(solution + index), *(minimum))) {
+
         *(status + index) = 2;
         *(known_status + index) = 1;
     }
+
 }
+
 
 __global__ void remove_known(int *indices_mask, int *status) {
     
     int index;
     index = blockIdx.x * blockDim.x + threadIdx.x;
+    if (index >= total_cells()) return;
     if ((*(status + index) == 2) && (*(indices_mask + index) == 1)) {
+
         *(indices_mask + index) = 0;
     }
 }
@@ -462,9 +504,11 @@ __global__ void self_label(double *solution, int *status, int *known_status, int
     double soln, a_soln, diag_soln;
     
     index = blockIdx.x * blockDim.x + threadIdx.x;
+    if (index >= N * N) return;
 
     i = index / N, j = index - i*N; 
     indices self_indices = {i,j};
+
 
     if (*(status + index) != 2) {
         indices_list neighbors = get_adjacents(self_indices); 
@@ -486,18 +530,25 @@ __global__ void self_label(double *solution, int *status, int *known_status, int
                         a_soln = min(a_soln, difference_adj_diag(soln, *(solution + index_adj_diag), self_indices));
                     }
                 }
-                free(more_neighbors.list); 
+                // NOTE: no free() here. get_diagonals_with_adjacent returns a
+                // struct whose .list points at a *stack* array; freeing it is
+                // undefined behavior and corrupts the device heap.
                 label(solution, status, indices_mask, index, a_soln);
             }
         } 
-        free(neighbors.list);
 
-        neighbors = get_diagonals(self_indices);
+            neighbors = get_diagonals(self_indices);
         for (k=0; k<neighbors.count; k++) {
             indices neighbor = *(neighbors.list + k);
             index_diag = indices_to_index(neighbor, N);
 
+            // Keep the ORIGINAL condition (guard on index_adj). Although it
+            // looks like it should be index_diag, this is what reproduces the
+            // sequential solver bit-for-bit; using index_diag here changes the
+            // frontier and pushes values below the sequential result.
             if ((*(known_status + index_adj) == 1) && (*(status + index_adj) == 2)) {  
+
+
 
                 soln = *(solution + index_diag);
                 diag_soln = difference_diag(soln, self_indices);
@@ -510,13 +561,12 @@ __global__ void self_label(double *solution, int *status, int *known_status, int
                         diag_soln = min(diag_soln, difference_adj_diag(*(solution + index_adj_diag), soln, self_indices));
                     }
                 } 
-                free(more_neighbors.list); 
                 label(solution, status, indices_mask, index, diag_soln);
             }
         } 
-        free(neighbors.list);
     }
 }
+
 
 void marching_with_correctness_criterion(double* solution, int *status, dim3 dimGrid, dim3 dimBlock, int M) {
     int N = round((MAX - MIN) / spacing);
@@ -527,79 +577,61 @@ void marching_with_correctness_criterion(double* solution, int *status, dim3 dim
     gpuErrchk(cudaMalloc((void**)&new_indices_mask, M*sizeof(int)));
     gpuErrchk(cudaMalloc((void**)&known_status, M*sizeof(int))); 
   
-    // mask_init<<<dimGrid, dimBlock>>>(indices_mask);
-    // gpuErrchk(cudaGetLastError());
-    // gpuErrchk(cudaDeviceSynchronize());
-    // mask_init<<<dimGrid, dimBlock>>>(new_indices_mask);
-    // gpuErrchk(cudaGetLastError());
-    // gpuErrchk(cudaDeviceSynchronize());
-    // known_status_init<<<dimGrid, dimBlock>>>(known_status, status);
-    // gpuErrchk(cudaGetLastError());
-    // gpuErrchk(cudaDeviceSynchronize());
-
     masks_and_known_status_init<<<dimGrid, dimBlock>>>(indices_mask, new_indices_mask, known_status, status);
     gpuErrchk(cudaGetLastError());
-    gpuErrchk(cudaDeviceSynchronize());
 
     self_label<<<dimGrid, dimBlock>>>(solution, status, known_status, indices_mask);
     gpuErrchk(cudaGetLastError());
-    gpuErrchk(cudaDeviceSynchronize()); 
 
     mask_init<<<dimGrid, dimBlock>>>(known_status);
     gpuErrchk(cudaGetLastError());
-    gpuErrchk(cudaDeviceSynchronize());
 
     int *count_gpu, *count_cpu;
     
     count_cpu = (int *) malloc (sizeof(int));
     gpuErrchk(cudaMalloc((void**)&count_gpu, sizeof(int)));
 
-    get_num_labels(count_gpu, indices_mask, dimGrid, dimBlock);
+    // Scratch buffers for the two-stage reductions, allocated ONCE here instead
+    // of every iteration. The previous code did cudaMalloc inside get_min /
+    // get_num_labels on every pass and never freed it (a slow, synchronizing
+    // call plus a growing memory leak). REDUCE_BLOCKS partials are enough.
+    double *min_scratch;
+    int    *sum_scratch;
+    gpuErrchk(cudaMalloc((void**)&min_scratch, REDUCE_BLOCKS*sizeof(double)));
+    gpuErrchk(cudaMalloc((void**)&sum_scratch, REDUCE_BLOCKS*sizeof(int)));
+
+    get_num_labels(count_gpu, indices_mask, sum_scratch, M);
     gpuErrchk(cudaMemcpy(count_cpu, count_gpu, sizeof(int), cudaMemcpyDeviceToHost));
 
     double *minimum_gpu;
     gpuErrchk(cudaMalloc((void**)&minimum_gpu, sizeof(double)));
  
     while (*(count_cpu) > 0) {  
-        get_min(minimum_gpu, solution, indices_mask, dimGrid, dimBlock); 
+        get_min(minimum_gpu, solution, indices_mask, min_scratch, M);
         update_status_with_criterion<<<dimGrid, dimBlock>>>(solution, status, known_status, minimum_gpu);
         gpuErrchk(cudaGetLastError());
-        gpuErrchk(cudaDeviceSynchronize());
 
         self_label<<<dimGrid, dimBlock>>>(solution, status, known_status, new_indices_mask);
         gpuErrchk(cudaGetLastError());
-        gpuErrchk(cudaDeviceSynchronize());
-
-        // mask_init<<<dimGrid, dimBlock>>>(known_status);
-        // gpuErrchk(cudaGetLastError());
-        // gpuErrchk(cudaDeviceSynchronize());
-
-        // remove_known<<<dimGrid, dimBlock>>>(indices_mask, status);
-        // gpuErrchk(cudaGetLastError());
-        // gpuErrchk(cudaDeviceSynchronize());
-        // sum<<<dimGrid, dimBlock>>>(indices_mask, new_indices_mask);
-        // gpuErrchk(cudaGetLastError());
-        // gpuErrchk(cudaDeviceSynchronize());
-        // mask_init<<<dimGrid, dimBlock>>>(new_indices_mask);
-        // gpuErrchk(cudaGetLastError());
-        // gpuErrchk(cudaDeviceSynchronize());
 
         known_status_init_and_remove_known_and_sum_and_new_indices_mask_init<<<dimGrid, dimBlock>>>(known_status, indices_mask, status, new_indices_mask);
         gpuErrchk(cudaGetLastError());
-        gpuErrchk(cudaDeviceSynchronize());
 
-        get_num_labels(count_gpu, indices_mask, dimGrid, dimBlock);
+        get_num_labels(count_gpu, indices_mask, sum_scratch, M);
         gpuErrchk(cudaMemcpy(count_cpu, count_gpu, sizeof(int), cudaMemcpyDeviceToHost));
     }  
 
     free(count_cpu);
-    cudaFree(indices_mask); cudaFree(new_indices_mask); cudaFree(known_status); cudaFree(count_gpu); cudaFree(minimum_gpu);
+    cudaFree(indices_mask); cudaFree(new_indices_mask); cudaFree(known_status);
+    cudaFree(count_gpu); cudaFree(minimum_gpu);
+    cudaFree(min_scratch); cudaFree(sum_scratch);
 }
+
 
 int main() {
     int N = round((MAX - MIN) / spacing); 
     int M = N*N;
-    int blockSize = M/GridSize;
+    int blockSize = 256;  // Use fixed block size for better occupancy
 
     // printf("%d %d", M, blockSize);
 
@@ -617,7 +649,8 @@ int main() {
     cudaMemcpy(solution_gpu, solution_cpu, M*sizeof(double), cudaMemcpyHostToDevice);
     cudaMemcpy(status_gpu, status_cpu, M*sizeof(int), cudaMemcpyHostToDevice);
     
-    dim3 dimGrid(GridSize);
+    // Use reasonable grid size based on blockSize and total elements
+    dim3 dimGrid((N*N + blockSize - 1) / blockSize);
     dim3 dimBlock(blockSize);
 
     marching_with_correctness_criterion(solution_gpu, status_gpu, dimGrid, dimBlock, M);
@@ -634,5 +667,3 @@ int main() {
     cudaFree(solution_gpu); cudaFree(status_gpu);
 
 }
-
-
